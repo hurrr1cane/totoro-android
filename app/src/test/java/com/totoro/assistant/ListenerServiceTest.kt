@@ -34,7 +34,7 @@ class ListenerServiceTest {
             // Перевіримо що isRunning став true (startForeground мав спрацювати)
             Thread.sleep(500)
             // Service не повинен впасти
-            controller.stop()
+            controller.stopCommand(0)
         } catch (t: Throwable) {
             System.err.println("### TotoroListenerService start FAILED ###")
             t.printStackTrace()
