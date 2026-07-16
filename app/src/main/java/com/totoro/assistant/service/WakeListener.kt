@@ -35,7 +35,23 @@ class WakeListener(
     private val picovoiceKey: String,
     private val onWake: (String) -> Unit
 ) {
-    companion object { private const val TAG = "TotoroWake" }
+    companion object {
+        private const val TAG = "TotoroWake"
+
+        @JvmStatic
+        fun errorName(code: Int): String = when (code) {
+            SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (recording problem)"
+            SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (other client error)"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+            SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+            SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH (no speech detected)"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+            SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT (no input)"
+            else -> "UNKNOWN_ERROR_$code"
+        }
+    }
 
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
@@ -75,25 +91,25 @@ class WakeListener(
     }
 
     /**
-     * Результат captureCommand — або текст, або код помилки (через [error]).
+     * Результат captureCommand — або текст, або код помилки (через [errCode]/[errMsg]).
      */
-    data class CaptureResult(val text: String? = null, val error: Int = 0, val errorName: String = "")
+    data class CaptureResult(val text: String? = null, val errCode: Int = 0, val errMsg: String = "")
 
     fun captureCommand(timeoutMs: Long = 6500): CaptureResult {
         if (ContextCompat.checkSelfPermission(
                 context, Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
-        ) return CaptureResult(error = -1, errorName = "no_RECORD_AUDIO")
+        ) return CaptureResult(errCode = -1, errMsg = "no_RECORD_AUDIO")
         if (!SpeechRecognizer.isRecognitionAvailable(context))
-            return CaptureResult(error = -2, errorName = "SR_unavailable")
+            return CaptureResult(errCode = -2, errMsg = "SR_unavailable")
 
         val sr = try {
             SpeechRecognizer.createSpeechRecognizer(context)
         } catch (e: Throwable) {
             Log.w(TAG, "createSpeechRecognizer for capture failed", e)
-            return CaptureResult(error = -3, errorName = "createSR_failed: ${e.message}")
+            return CaptureResult(errCode = -3, errMsg = "createSR_failed: ${e.message}")
         }
-        if (sr == null) return CaptureResult(error = -3, errorName = "createSR_returned_null")
+        if (sr == null) return CaptureResult(errCode = -3, errMsg = "createSR_returned_null")
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -104,7 +120,7 @@ class WakeListener(
         }
         var resultText: String? = null
         var resultError: Int = 0
-        var resultErrorName = ""
+        var resultErrorMsg = ""
         val done = Object()
 
         sr.setRecognitionListener(object : RecognitionListener {
@@ -130,7 +146,7 @@ class WakeListener(
             }
             override fun onError(e: Int) {
                 resultError = e
-                resultErrorName = errorName(e)
+                resultErrorMsg = errorName(e)
                 Log.w(TAG, "capture onError=$e (${errorName(e)})")
                 synchronized(done) { done.notifyAll() }
                 try { sr.destroy() } catch (_: Throwable) {}
@@ -167,10 +183,10 @@ class WakeListener(
         try { sr.destroy() } catch (_: Throwable) {}
 
         return when {
-            startError[0] != null -> CaptureResult(error = -5, errorName = "startListening: ${startError[0]!!.message}")
+            startError[0] != null -> CaptureResult(errCode = -5, errMsg = "startListening: ${startError[0]!!.message}")
             resultText != null -> CaptureResult(text = resultText)
-            resultError != 0 -> CaptureResult(error = resultError, errorName = resultErrorName)
-            else -> CaptureResult(error = -100, errorName = "timeout (no results, no error)")
+            resultError != 0 -> CaptureResult(errCode = resultError, errMsg = resultErrorMsg)
+            else -> CaptureResult(errCode = -100, errMsg = "timeout (no results, no error)")
         }
     }
 
@@ -331,22 +347,6 @@ class WakeListener(
                 try { porcupine?.delete() } catch (_: Throwable) {}
                 if (running.get() && SpeechRecognizer.isRecognitionAvailable(context)) startSpeechRecognizer()
             }
-        }
-    }
-
-    companion object {
-        @Suppress("MemberVisibilityCanBePrivate")
-        fun errorName(code: Int): String = when (code) {
-            SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (recording problem)"
-            SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (other client error)"
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
-            SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
-            SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH (no speech detected)"
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
-            SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT (no input)"
-            else -> "UNKNOWN_ERROR_$code"
         }
     }
 }

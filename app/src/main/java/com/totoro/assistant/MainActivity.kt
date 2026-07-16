@@ -192,9 +192,9 @@ class MainActivity : ComponentActivity() {
                 lastCommand = result.text
                 executeCommand(result.text)
             } else {
-                LiveLog.warn("test", "SR err=${result.error} ${result.errorName}")
-                statusText = "Помилка SR: ${result.errorName}"
-                lastError = "SR: ${result.errorName}"
+                LiveLog.warn("test", "SR err=${result.errCode} ${result.errMsg}")
+                statusText = "Помилка SR: ${result.errMsg} (code=${result.errCode})"
+                lastError = "SR: ${result.errMsg}"
             }
         }
     }
