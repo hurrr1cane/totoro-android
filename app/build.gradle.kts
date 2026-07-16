@@ -103,4 +103,7 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("androidx.test:core-ktx:1.6.1")
+    testImplementation("androidx.lifecycle:lifecycle-runtime-testing:2.8.3")
+    testImplementation("androidx.test.ext:junit:1.2.1")
 }
