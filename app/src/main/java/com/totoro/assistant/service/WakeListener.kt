@@ -103,13 +103,31 @@ class WakeListener(
         if (!SpeechRecognizer.isRecognitionAvailable(context))
             return CaptureResult(errCode = -2, errMsg = "SR_unavailable")
 
-        val sr = try {
-            SpeechRecognizer.createSpeechRecognizer(context)
-        } catch (e: Throwable) {
-            Log.w(TAG, "createSpeechRecognizer for capture failed", e)
-            return CaptureResult(errCode = -3, errMsg = "createSR_failed: ${e.message}")
+        // createSpeechRecognizer() має викликатися ТІЛЬКИ з main thread —
+        // інакше кидає "SpeechRecognizer should be used only from the
+        // application's main thread".
+        val createdHolder = arrayOfNulls<SpeechRecognizer>(1)
+        val createErr = arrayOfNulls<Throwable>(1)
+        val createReady = Object()
+        mainHandler.post {
+            try {
+                createdHolder[0] = SpeechRecognizer.createSpeechRecognizer(context)
+            } catch (t: Throwable) {
+                createErr[0] = t
+            } finally {
+                synchronized(createReady) { createReady.notifyAll() }
+            }
         }
-        if (sr == null) return CaptureResult(errCode = -3, errMsg = "createSR_returned_null")
+        synchronized(createReady) {
+            try { createReady.wait(2000) } catch (_: InterruptedException) {
+                return CaptureResult(errCode = -4, errMsg = "interrupted")
+            }
+        }
+        if (createErr[0] != null) {
+            Log.w(TAG, "createSpeechRecognizer for capture failed", createErr[0])
+            return CaptureResult(errCode = -3, errMsg = "createSR_failed: ${createErr[0]!!.message}")
+        }
+        val sr = createdHolder[0] ?: return CaptureResult(errCode = -3, errMsg = "createSR_returned_null")
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -194,9 +212,27 @@ class WakeListener(
         thread = thread(name = "totoro-wake-sr", isDaemon = true) {
             Log.i(TAG, "wake thread started")
             while (running.get()) {
-                val sr = try { SpeechRecognizer.createSpeechRecognizer(context) }
-                catch (e: Throwable) { Log.e(TAG, "createSpeechRecognizer failed", e); return@thread }
-                if (sr == null) { Thread.sleep(2000); continue }
+                // createSpeechRecognizer() — тільки з main thread
+                val srHolder = arrayOfNulls<SpeechRecognizer>(1)
+                val createErr = arrayOfNulls<Throwable>(1)
+                val createReady = Object()
+                mainHandler.post {
+                    try {
+                        srHolder[0] = SpeechRecognizer.createSpeechRecognizer(context)
+                    } catch (t: Throwable) {
+                        createErr[0] = t
+                    } finally {
+                        synchronized(createReady) { createReady.notifyAll() }
+                    }
+                }
+                synchronized(createReady) {
+                    try { createReady.wait(2000) } catch (_: InterruptedException) { return@thread }
+                }
+                if (createErr[0] != null || srHolder[0] == null) {
+                    Log.e(TAG, "createSpeechRecognizer failed", createErr[0])
+                    Thread.sleep(2000); continue
+                }
+                val sr = srHolder[0]!!
 
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
