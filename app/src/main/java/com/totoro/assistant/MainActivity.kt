@@ -1,126 +1,128 @@
 package com.totoro.assistant
 
 import android.Manifest
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.util.Log
+import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.core.content.ContextCompat
 import com.totoro.assistant.diagnostics.HermesReporter
+import com.totoro.assistant.service.CommandRouter
 import com.totoro.assistant.service.TotoroListenerService
 import com.totoro.assistant.service.WakeListener
 import com.totoro.assistant.ui.HomeScreen
+import com.totoro.assistant.ui.LiveLog
+import kotlinx.coroutines.*
 
 class MainActivity : ComponentActivity() {
 
-    private val TAG = "TotoroMain"
-    private val audioPermission = Manifest.permission.RECORD_AUDIO
-    private val postNotifications = Manifest.permission.POST_NOTIFICATIONS
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var wakeListener: WakeListener? = null
 
     private var listening by mutableStateOf(false)
     private var lastCommand by mutableStateOf<String?>(null)
     private var statusText by mutableStateOf("Готовий.")
     private var lastError by mutableStateOf<String?>(null)
-    private var usingServiceOnly by mutableStateOf(false)
-    private var activityWakeListener: WakeListener? = null
+    private var speechAvailable by mutableStateOf(SpeechRecognizer.isRecognitionAvailable(this))
+    private var isTestListening by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        val allGranted = results.values.all { it }
-        HermesReporter.report(this, "INFO", TAG, "perms_result",
-            "granted=${results.filterValues { it }.keys}, denied=${results.filterValues { !it }.keys}")
-        if (allGranted) {
-            // Запускаємо одразу
-            startTotoroWithBothBackends()
+        val granted = results.filterValues { it }.keys
+        val denied = results.filterValues { !it }.keys
+        LiveLog.info("perms", "granted=$granted denied=$denied")
+        HermesReporter.report(this, "INFO", "perms", "result",
+            "granted=$granted denied=$denied")
+        if (denied.isEmpty()) {
+            startTotoro()
         } else {
-            statusText = "Дозволи не надано — слухатиму якщо увімкнеш у налаштуваннях"
-            lastError = results.filterValues { !it }.keys.firstOrNull()
+            statusText = "Дозволи не надані: ${denied.joinToString(", ")}"
+            lastError = "Бракує: ${denied.joinToString(", ")}"
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LiveLog.event("app", "MainActivity.onCreate")
+        HermesReporter.report(this, "INFO", "MainActivity", "onCreate",
+            "sdk=${Build.VERSION.SDK_INT} speechAvail=${SpeechRecognizer.isRecognitionAvailable(this)}")
 
-        HermesReporter.report(this, "INFO", TAG, "activity_onCreate",
-            "sdk=${Build.VERSION.SDK_INT}")
-
-        // Запам'ятати: чи можна запустити службу, чи треба тільки Activity-режим
-        try {
-            setContent {
-                HomeScreen(
-                    listening = listening,
-                    lastCommand = lastCommand,
-                    statusText = statusText,
-                    lastError = lastError,
-                    onStartListening = ::onUserPressedStart,
-                    onStopListening = ::stopAll,
-                    onOpenSettings = ::openAppSettings
-                )
-            }
-        } catch (e: Throwable) {
-            Log.e(TAG, "setContent failed", e)
-            HermesReporter.report(this, "ERROR", TAG, "setContent_fail", e.message)
+        setContent {
+            // Compose reads LiveLog.events — він reactive
+            val events: SnapshotStateList<String> = LiveLog.events
+            HomeScreen(
+                listening = listening,
+                lastCommand = lastCommand,
+                statusText = statusText,
+                lastError = lastError,
+                liveEvents = events,
+                speechAvailable = speechAvailable,
+                onStartListening = ::onUserPressedStart,
+                onStopListening = ::stopTotoro,
+                onOpenSettings = ::openSettings,
+                onTestCommand = ::testCommandManually,
+                onTestVoiceListen = ::testVoiceListen,
+                onRefresh = ::refreshState
+            )
         }
     }
 
     override fun onResume() {
         super.onResume()
-        // Якщо служба все ще жива — синхронізуємо UI
-        if (TotoroListenerService.isRunning) {
-            listening = true
-            usingServiceOnly = true
-            statusText = "Слухаю 'Гей, Тоторо' (служба активна)"
-        }
+        refreshState()
     }
 
     override fun onDestroy() {
-        // Activity-only wake listener — зупинити, якщо додаток закривають
-        try { activityWakeListener?.stop() } catch (_: Throwable) {}
-        activityWakeListener = null
+        try { wakeListener?.stop() } catch (_: Throwable) {}
+        scope.cancel()
         super.onDestroy()
     }
 
+    private fun refreshState() {
+        val avail = SpeechRecognizer.isRecognitionAvailable(this)
+        speechAvailable = avail
+        // Активна служба?
+        val serviceRunning = TotoroListenerService.isRunning
+        listening = serviceRunning || wakeListener != null
+        LiveLog.info("refresh", "SR=$avail service=$serviceRunning wake=${wakeListener != null}")
+        statusText = when {
+            !avail && !serviceRunning -> "⚠ SpeechRecognizer недоступний. Встанови Google Search (Google Now) або GMS."
+            serviceRunning -> "Слухаю 'Гей, Тоторо' (служба активна)"
+            wakeListener != null -> "Слухаю 'Гей, Тоторо' (активність)"
+            else -> "Готовий. Натисни ▶ щоб увімкнути."
+        }
+    }
+
     private fun onUserPressedStart() {
-        val perms = mutableListOf(audioPermission)
+        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(postNotifications)
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         val missing = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isEmpty()) {
-            startTotoroWithBothBackends()
+            startTotoro()
         } else {
+            LiveLog.info("start", "Запитую дозволи: ${missing.joinToString(", ")}")
             permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
-    /**
-     * Запуск у двох режимах одночасно:
-     * 1) ForegroundService (живе навіть коли додаток закритий)
-     * 2) WakeListener в межах Activity (працює навіть якщо служба падає)
-     *
-     * Якщо служба впаде — Activity-fallback продовжує слухати,
-     * і тоді HermesReporter повідомляє про проблему.
-     */
-    private fun startTotoroWithBothBackends() {
-        startForegroundServiceSafe()
-        startActivityFallback()
-        listening = true
-        statusText = "Слухаю 'Гей, Тоторо'… (служба + Activity)"
-        HermesReporter.report(this, "INFO", TAG, "both_started")
-    }
-
-    private fun startForegroundServiceSafe() {
+    private fun startTotoro() {
+        refreshState()
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            lastError = "SpeechRecognizer недоступний. Встанови/онови Google App."
+            LiveLog.error("start", "SpeechRecognizer недоступний")
+        }
+        // 1) Запустити ForegroundService (стара логіка)
         try {
             val intent = Intent(this, TotoroListenerService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -128,57 +130,109 @@ class MainActivity : ComponentActivity() {
             } else {
                 startService(intent)
             }
-            usingServiceOnly = true
+            LiveLog.event("service", "ForegroundService запущено")
         } catch (e: Throwable) {
-            Log.e(TAG, "startForegroundService failed", e)
-            HermesReporter.report(this, "ERROR", TAG, "start_service_fail", e.message)
-            lastError = "Служба: ${e.javaClass.simpleName}"
-            usingServiceOnly = false
+            LiveLog.error("service", "Не вдалося стартувати: ${e.message}")
+            HermesReporter.report(this, "ERROR", "MainActivity", "start_service_fail", e.message)
         }
-    }
 
-    private fun startActivityFallback() {
-        if (activityWakeListener != null) return
+        // 2) Запустити wake listener в межах Activity
         try {
-            activityWakeListener = WakeListener(
+            wakeListener = WakeListener(
                 context = applicationContext,
                 language = "uk-UA",
                 usePorcupine = false,
                 picovoiceKey = "",
                 onWake = { phrase ->
-                    HermesReporter.report(this, "INFO", TAG, "wake_in_activity", phrase.take(80))
-                    // Зараз ми не виконуємо команди з Activity-mode — це робить служба.
-                    // Цей listener — лише «keep alive» для Hermes-телеметрії.
+                    LiveLog.event("wake", "🟢 Wake: '$phrase'")
+                    HermesReporter.report(this, "INFO", "MainActivity", "wake", phrase)
+                    scope.launch { executeCommand(phrase) }
                 }
             )
-            activityWakeListener?.start()
-            HermesReporter.report(this, "INFO", TAG, "activity_wake_started")
+            wakeListener?.start()
+            LiveLog.event("activity", "WakeListener стартований в Activity")
+            lastError = null
+            listening = true
+            statusText = "Слухаю 'Гей, Тоторо'…"
         } catch (e: Throwable) {
-            Log.e(TAG, "activity fallback failed", e)
-            HermesReporter.report(this, "ERROR", TAG, "activity_fallback_fail", e.message)
+            LiveLog.error("activity", "WakeListener.start fail: ${e.message}")
+            lastError = "Wake: ${e.javaClass.simpleName}"
         }
     }
 
-    private fun stopAll() {
-        try { stopService(Intent(this, TotoroListenerService::class.java)) } catch (_: Throwable) {}
-        try { activityWakeListener?.stop() } catch (_: Throwable) {}
-        activityWakeListener = null
+    private fun stopTotoro() {
+        try {
+            stopService(Intent(this, TotoroListenerService::class.java))
+        } catch (_: Throwable) {}
+        try { wakeListener?.stop() } catch (_: Throwable) {}
+        wakeListener = null
         listening = false
-        usingServiceOnly = false
         statusText = "Зупинено."
-        HermesReporter.report(this, "INFO", TAG, "stop_all")
+        LiveLog.event("stop", "Все зупинено")
     }
 
-    private fun openAppSettings() {
-        // Перейти на сторінку нашого додатку в Android Settings
+    /** Запуск короткого тестового прослуховування — показати, чи SR взагалі чує. */
+    private fun testVoiceListen() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            LiveLog.error("test", "SpeechRecognizer недоступний")
+            return
+        }
+        LiveLog.event("test", "Запускаю одноразовий SR listen (3 сек)…")
+        isTestListening = true
+        scope.launch {
+            val result = wakeListener?.captureCommand(timeoutMs = 4000)
+            isTestListening = false
+            if (result == null) {
+                LiveLog.warn("test", "SR нічого не почув (timeout 4с)")
+                statusText = "Тест: SR мовчить. Можливі причини: мікрофон зайнятий, DND, інший застосунок слухає."
+            } else {
+                LiveLog.event("test", "🎤 SR почув: '$result'")
+                lastCommand = result
+                executeCommand(result)
+            }
+        }
+    }
+
+    /** Виконати команду вручну (набір у полі вводу) — bypass SR. */
+    private fun testCommandManually(cmd: String) {
+        LiveLog.event("manual", "Виконую вручну: '$cmd'")
+        scope.launch { executeCommand(cmd) }
+    }
+
+    private suspend fun executeCommand(command: String) {
+        lastCommand = command
+        statusText = "Виконую: $command"
+        withContext(Dispatchers.Main) {
+            try {
+                val lower = command.lowercase()
+                when {
+                    lower.contains("youtube music") || (lower.contains("муз") && lower.contains("youtube")) ->
+                        CommandRouter.playYTMusic(this@MainActivity, command)
+                    lower.contains("youtube") ->
+                        CommandRouter.playYT(this@MainActivity, command)
+                    lower.contains("spotify") || lower.contains("спотіф") ->
+                        CommandRouter.playSpotify(this@MainActivity, command)
+                    lower.startsWith("таймер") || lower.contains("постав таймер") ->
+                        CommandRouter.setTimer(this@MainActivity, command)
+                    else -> {
+                        LiveLog.warn("exec", "Невідома команда: '$command'")
+                        statusText = "Невідома команда: $command"
+                    }
+                }
+                LiveLog.event("exec", "OK: $command")
+                statusText = "Готово: $command"
+            } catch (e: Throwable) {
+                LiveLog.error("exec", "Виняток: ${e.javaClass.simpleName} ${e.message}")
+                lastError = "${e.javaClass.simpleName}"
+            }
+        }
+    }
+
+    private fun openSettings() {
         try {
-            val intent = android.content.Intent(this, SettingsActivity::class.java)
-            startActivity(intent)
+            startActivity(Intent(this, SettingsActivity::class.java))
         } catch (e: Throwable) {
-            // Fallback — стандартні Android settings
-            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:$packageName"))
-            startActivity(intent)
+            LiveLog.error("settings", e.message ?: "")
         }
     }
 }
