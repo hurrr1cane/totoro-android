@@ -19,7 +19,7 @@ import org.robolectric.shadows.ShadowLog
  * якщо проблема в коді (а не в планшеті/оточенні).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], manifest = Config.DEFAULT)  // ← реальний AndroidManifest.xml!
+@Config(sdk = [34])  // реальний AndroidManifest.xml підхопиться автоматично з app/src/main
 class CrashTest {
 
     @Test
@@ -66,10 +66,6 @@ class CrashTest {
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             // Тепер натискаємо кнопку через scenario.onActivity
             scenario.onActivity { activity ->
-                // Імітуємо onClick через reflection на полі
-                try {
-                    val btnField = activity.javaClass.getDeclaredField("$delegate").let { null } // not exist
-                } catch (e: NoSuchFieldException) { /* ignore */ }
                 System.out.println("[CrashTest] after moves")
             }
         } catch (t: Throwable) {
