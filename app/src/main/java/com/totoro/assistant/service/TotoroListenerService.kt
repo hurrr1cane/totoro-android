@@ -197,7 +197,7 @@ class TotoroListenerService : Service() {
                             if (cmd.isNotBlank()) execute(cmd)
                         } catch (e: Throwable) {
                             Log.e(TAG, "capture/execute", e)
-                            HermesReporter.report(this, "ERROR", TAG, "capture_fail", e.message)
+                            HermesReporter.report(this@TotoroListenerService, "ERROR", TAG, "capture_fail", e.message)
                         } finally {
                             commandSession = false
                             updateNotificationText("Слухаю 'Гей, Тоторо'…")
@@ -262,7 +262,7 @@ class TotoroListenerService : Service() {
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "execute: $command", e)
-                HermesReporter.report(this, "ERROR", TAG, "execute_fail", e.message)
+                HermesReporter.report(this@TotoroListenerService, "ERROR", TAG, "execute_fail", e.message)
             }
         }
     }
