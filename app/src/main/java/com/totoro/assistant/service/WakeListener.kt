@@ -171,7 +171,7 @@ class WakeListener(
             try {
                 done.wait(timeoutMs)
             } catch (_: InterruptedException) {
-                return CaptureResult(error = -4, errorName = "interrupted")
+                return CaptureResult(errCode = -4, errMsg = "interrupted")
             }
         }
         // Якщо startListening ще навіть не викликали — почекай трохи
