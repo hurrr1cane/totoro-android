@@ -4,13 +4,11 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
-import com.totoro.assistant.diagnostics.LogStore
 
 class TotoroApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // Підключаємо crash handler ДО будь-яких інших ініціалізацій
-        LogStore.init(this)
         CrashHandler.install(this)
         ensureNotificationChannel()
     }
