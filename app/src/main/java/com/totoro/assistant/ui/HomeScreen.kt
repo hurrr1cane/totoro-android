@@ -177,7 +177,8 @@ fun HomeScreen(
 
 @Composable
 private fun ManualCommandInput(onSubmit: (String) -> Unit) {
-    var text by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    val state = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    val text = state.value
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -185,7 +186,7 @@ private fun ManualCommandInput(onSubmit: (String) -> Unit) {
     ) {
         OutlinedTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = { newText -> state.value = newText },
             placeholder = { Text("Введи команду… напр. 'увімкни youtube'", fontSize = 12.sp) },
             singleLine = true,
             modifier = Modifier.weight(1f),
@@ -195,7 +196,7 @@ private fun ManualCommandInput(onSubmit: (String) -> Unit) {
             onClick = {
                 if (text.isNotBlank()) {
                     onSubmit(text.trim())
-                    text = ""
+                    state.value = ""
                 }
             }
         ) { Text("▶") }
