@@ -11,7 +11,7 @@ android {
     defaultConfig {
         applicationId = "com.totoro.assistant"
         // Picovoice AccessKey. Читається з local.properties (НЕ комітимо!).
-        val picovoiceKey: String = gradle.localProperties("PICOVOICE_KEY") ?: ""
+        val picovoiceKey: String = (project.findProperty("PICOVOICE_KEY") as? String).orEmpty()
         buildConfigField("String", "PICOVOICE_KEY", "\"$picovoiceKey\"")
         minSdk = 24           // Android 7.0+ (більшість сучасних планшетів)
         targetSdk = 34
