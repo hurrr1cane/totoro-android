@@ -29,7 +29,7 @@ class MainActivity : ComponentActivity() {
     private var lastCommand by mutableStateOf<String?>(null)
     private var statusText by mutableStateOf("Готовий.")
     private var lastError by mutableStateOf<String?>(null)
-    private var speechAvailable by mutableStateOf(SpeechRecognizer.isRecognitionAvailable(this))
+    private var speechAvailable by mutableStateOf(false)
     private var isTestListening by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(
@@ -50,19 +50,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        LiveLog.event("app", "MainActivity.onCreate")
+        speechAvailable = SpeechRecognizer.isRecognitionAvailable(this)
+        LiveLog.event("app", "MainActivity.onCreate SR=$speechAvailable")
         HermesReporter.report(this, "INFO", "MainActivity", "onCreate",
-            "sdk=${Build.VERSION.SDK_INT} speechAvail=${SpeechRecognizer.isRecognitionAvailable(this)}")
+            "sdk=${Build.VERSION.SDK_INT} speechAvail=$speechAvailable")
 
         setContent {
-            // Compose reads LiveLog.events — він reactive
-            val events: SnapshotStateList<String> = LiveLog.events
             HomeScreen(
                 listening = listening,
                 lastCommand = lastCommand,
                 statusText = statusText,
                 lastError = lastError,
-                liveEvents = events,
+                liveEvents = LiveLog.events,
                 speechAvailable = speechAvailable,
                 onStartListening = ::onUserPressedStart,
                 onStopListening = ::stopTotoro,
