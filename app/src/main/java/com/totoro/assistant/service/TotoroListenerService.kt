@@ -193,8 +193,14 @@ class TotoroListenerService : Service() {
                     commandSession = true
                     scope.launch {
                         try {
-                            val cmd = wakeListener?.captureCommand(timeoutMs = 6500) ?: ""
-                            if (cmd.isNotBlank()) execute(cmd)
+                            val r = wakeListener?.captureCommand(timeoutMs = 6500)
+                            val cmd = r?.text
+                            if (r != null) {
+                                Log.i(TAG, "SR capture: text='$cmd' err=${r.errCode} (${r.errMsg})")
+                                HermesReporter.report(this@TotoroListenerService, "INFO", TAG, "capture",
+                                    "text=$cmd err=${r.errCode}")
+                            }
+                            if (!cmd.isNullOrBlank()) execute(cmd)
                         } catch (e: Throwable) {
                             Log.e(TAG, "capture/execute", e)
                             HermesReporter.report(this@TotoroListenerService, "ERROR", TAG, "capture_fail", e.message)
@@ -206,7 +212,7 @@ class TotoroListenerService : Service() {
                 }
             )
             wakeListener?.start()
-            HermesReporter.report(this, "INFO", TAG, "listening_started")
+            HermesReporter.report(this@TotoroListenerService, "INFO", TAG, "listening_started")
         } catch (e: Throwable) {
             Log.e(TAG, "startListening", e)
             HermesReporter.report(this, "ERROR", TAG, "start_listening_fail", e.message)
