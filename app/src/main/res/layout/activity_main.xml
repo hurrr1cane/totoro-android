@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Тоторо</string>
+    <string name="wakeword">Гей, Тоторо</string>
+</resources>
