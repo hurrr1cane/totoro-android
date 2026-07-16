@@ -1,6 +1,7 @@
 package com.totoro.assistant.service
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,19 +13,21 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.totoro.assistant.R
+import com.totoro.assistant.TotoroNotificationChannel
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * Слухач wake-word «торо».
+ * Слухач wake-word «торо» (або «тоторо») + capture команди.
  *
- * Повністю відмовостійкий: якщо SR недоступний — повертає control без exception.
- * Якщо немає RECORD_AUDIO — теж мовчки виходить.
- *
- * Шляхи:
- *   1) Porcupine (offline) — коли prefs.usePorcupine && accessKey не blank
- *   2) Android SpeechRecognizer — fallback
+ * Гнучка стратегія розпізнавання wake:
+ *  • приймаємо як «торо», так і «тоторо», «тору», тощо;
+ *  • реагуємо на onResults І на onPartialResults, щоб не залежати від
+ *    того, чи увімкнений EXTRA_PARTIAL_RESULTS на пристрої;
+ *  • коли wake розпізнано — відправляємо wake-повідомлення, щоб користувач бачив, що нас почули.
  */
 class WakeListener(
     private val context: Context,
@@ -38,15 +41,19 @@ class WakeListener(
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
 
+    /** Співпадає з «тоторо», «торо», «тору» тощо — будь-який варіант wake. */
+    private val WAKE_RE = Regex("[а-яіїєґa-z]*тор[а-яіїєґa-z]+|торо|тоторо|таро", RegexOption.IGNORE_CASE)
+
     fun start() {
         if (running.getAndSet(true)) return
-        Log.i(TAG, "start() usePorcupine=$usePorcupine")
+        Log.i(TAG, "start() usePorcupine=$usePorcupine language=$language")
 
         val audioGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         if (!audioGranted) {
             Log.w(TAG, "No RECORD_AUDIO permission, wake listener disabled")
+            notify("Немає дозволу на мікрофон")
             running.set(false)
             return
         }
@@ -56,7 +63,8 @@ class WakeListener(
         } else if (SpeechRecognizer.isRecognitionAvailable(context)) {
             startSpeechRecognizer()
         } else {
-            Log.w(TAG, "SpeechRecognizer unavailable and no Porcupine key — nothing to listen to")
+            Log.w(TAG, "SpeechRecognizer unavailable and no Porcupine key")
+            notify("SR недоступний - встановіть Google")
             running.set(false)
         }
     }
@@ -97,6 +105,7 @@ class WakeListener(
                 try { sr.destroy() } catch (_: Throwable) {}
             }
             override fun onError(e: Int) {
+                Log.w(TAG, "capture SR onError=$e")
                 synchronized(done) { done.notifyAll() }
                 try { sr.destroy() } catch (_: Throwable) {}
             }
@@ -119,9 +128,9 @@ class WakeListener(
         }
     }
 
-    // ────────────── SpeechRecognizer: постійне слухання ──────────────
     private fun startSpeechRecognizer() {
         thread = thread(name = "totoro-wake-sr", isDaemon = true) {
+            Log.i(TAG, "wake thread started")
             while (running.get()) {
                 val sr = try {
                     SpeechRecognizer.createSpeechRecognizer(context)
@@ -133,33 +142,42 @@ class WakeListener(
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
                 }
                 val started = Object()
-                var triggered = false
+                var sessionTriggered = false
                 sr.setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        Log.d(TAG, "SR ready")
+                    }
+                    override fun onBeginningOfSpeech() {
+                        Log.d(TAG, "SR speech start")
+                    }
                     override fun onPartialResults(partial: Bundle?) {
                         if (!running.get()) return
                         val list = partial?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
-                        list.firstOrNull()?.let { text ->
-                            val low = text.lowercase()
-                            if (low.contains("торо") && low.length > 4) {
-                                triggered = true
-                                val cmd = text.substringAfter("торо", "").trim().ifBlank { text }
-                                onWake(cmd)
-                                try { sr.stopListening() } catch (_: Throwable) {}
-                            }
+                        val text = list.firstOrNull() ?: return
+                        Log.d(TAG, "SR partial: $text")
+                        if (!sessionTriggered && looksLikeWake(text)) {
+                            sessionTriggered = true
+                            val cmd = extractCommand(text)
+                            Log.i(TAG, "Wake by partial: $text -> '$cmd'")
+                            notify("Чую: $text")
+                            onWake(cmd)
+                            try { sr.stopListening() } catch (_: Throwable) {}
                         }
                     }
                     override fun onResults(r: Bundle?) {
                         if (!running.get()) return
                         val list = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
-                        if (!triggered) {
-                            list.firstOrNull()?.let { text ->
-                                if (text.lowercase().contains("торо")) {
-                                    onWake(text)
-                                }
-                            }
+                        val text = list.firstOrNull() ?: ""
+                        Log.i(TAG, "SR final: '$text' (triggered=$sessionTriggered)")
+                        if (!sessionTriggered && looksLikeWake(text)) {
+                            val cmd = extractCommand(text)
+                            Log.i(TAG, "Wake by final: $text -> '$cmd'")
+                            notify("Чую: $text")
+                            onWake(cmd)
                         }
                         synchronized(started) { started.notifyAll() }
                     }
@@ -167,8 +185,6 @@ class WakeListener(
                         Log.w(TAG, "SR onError=$e")
                         synchronized(started) { started.notifyAll() }
                     }
-                    override fun onReadyForSpeech(params: Bundle?) {}
-                    override fun onBeginningOfSpeech() {}
                     override fun onRmsChanged(rmsdB: Float) {}
                     override fun onBufferReceived(buffer: ByteArray?) {}
                     override fun onEndOfSpeech() {}
@@ -185,12 +201,46 @@ class WakeListener(
                 }
                 try { sr.destroy() } catch (_: Throwable) {}
                 if (!running.get()) return@thread
-                Thread.sleep(200)
+                Thread.sleep(300)
             }
         }
     }
 
-    // ────────────── Porcupine (offline wake-word) ──────────────
+    private fun extractCommand(text: String): String {
+        val cleaned = text
+            .replace(Regex("^(гей|окей|hey|ok|okay)\\s+", RegexOption.IGNORE_CASE), "")
+        val m = WAKE_RE.find(cleaned)
+        if (m == null) return ""
+        val after = cleaned.substring(m.range.last + 1)
+            .replace(Regex("^[,.:\\-\\s]+", RegexOption.IGNORE_CASE), "")
+            .trim()
+        return after.replace(Regex("\\bбудь\\s*-?\\s*ласка\\b", RegexOption.IGNORE_CASE), "").trim()
+    }
+
+    private fun looksLikeWake(text: String): Boolean {
+        val low = text.lowercase()
+        return when {
+            WAKE_RE.containsMatchIn(low) -> true
+            low.contains("toro") -> true
+            low.contains("торо") || low.contains("таро") -> true
+            else -> false
+        }
+    }
+
+    private fun notify(text: String) {
+        try {
+            val notif = NotificationCompat.Builder(context, TotoroNotificationChannel.ID)
+                .setSmallIcon(R.drawable.ic_mic)
+                .setContentTitle("Тоторо")
+                .setContentText(text)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm.notify(System.currentTimeMillis().toInt() and 0x7fffffff, notif)
+        } catch (_: Throwable) {}
+    }
+
     private fun startPorcupine() {
         thread = thread(name = "totoro-wake-pv", isDaemon = true) {
             var record: AudioRecord? = null
@@ -222,17 +272,21 @@ class WakeListener(
                     return@thread
                 }
                 record.startRecording()
+                Log.i(TAG, "Porcupine listening")
 
                 val buf = ShortArray(frameLength)
                 while (running.get()) {
                     val read = record.read(buf, 0, frameLength)
                     if (read == frameLength) {
                         val kw = porcupine.process(buf)
-                        if (kw >= 0) onWake("Торо")
+                        if (kw >= 0) {
+                            Log.i(TAG, "Porcupine wake detected")
+                            onWake("Торо")
+                        }
                     }
                 }
             } catch (e: Throwable) {
-                Log.e(TAG, "Porcupine failed — falling back to SR", e)
+                Log.e(TAG, "Porcupine failed", e)
             } finally {
                 try { record?.stop() } catch (_: Throwable) {}
                 try { record?.release() } catch (_: Throwable) {}
