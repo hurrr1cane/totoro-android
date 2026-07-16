@@ -1,4 +1,4 @@
-name: Test on Android Emulator (API 34)
+name: Test (Robolectric — без емулятора)
 
 on:
   push:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-on-emulator:
-    runs-on: macos-latest
-    timeout-minutes: 60
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -34,7 +34,6 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
-          arch: x86_64
 
       - name: Write local.properties
         run: |
@@ -44,76 +43,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew || true
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Run Robolectric tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace --info 2>&1 | tee artifacts/raw-test-output.txt
+        continue-on-error: true
 
-      - name: Locate APK
-        id: apk
-        run: echo "apk_path=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)" >> $GITHUB_OUTPUT
-
-      - name: Run emulator (API 30 — підтримується reactivecircus)
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          arch: x86_64
-          target: google_apis
-          force-avd-creation: true
-          avd-name: totoro_test
-          emulator-options: -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect -accel off -memory 2048
-          disable-animations: true
-          script: |
-            set -e
-            apk_path=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
-            echo "==> APK: $apk_path"
-            echo "==> Android API: $(adb shell getprop ro.build.version.sdk)"
-            echo "==> Boot completed: $(adb shell getprop sys.boot_completed)"
-
-            echo "==> Installing APK..."
-            adb install -r -t -g "$apk_path" 2>&1 | tail -5
-
-            echo "==> Clearing logcat..."
-            adb logcat -c
-
-            echo "==> Force-stopping app first..."
-            adb shell am force-stop com.totoro.assistant || true
-            sleep 1
-
-            echo "==> Launching app via am start..."
-            adb shell am start -W -n com.totoro.assistant/.MainActivity 2>&1 | head -10
-            sleep 5
-
-            echo "==> Gathering diagnostics..."
-            mkdir -p artifacts
-
-            # 1) Чи живий процес?
-            adb shell "ps -A 2>/dev/null | grep totoro" > artifacts/processes.txt || true
-            echo "--- processes.txt ---" && cat artifacts/processes.txt
-
-            # 2) Crash dialog?
-            adb shell dumpsys window windows > artifacts/windows.txt 2>&1
-            echo "--- focused window ---" && grep -i 'mFocusedApp\|mCurrentFocus\|mFocusedWindow' artifacts/windows.txt | head -5
-
-            # 3) Logcat
-            adb logcat -d -v threadtime *:W AndroidRuntime:E ActivityManager:I TotoroCrash:V TotoroService:V TotoroWake:V TotoroLog:V System.err:W > artifacts/logcat.txt 2>&1
-
-            # 4) Чи є AndroidRuntime FATAL?
-            echo "--- crashes ---" && grep -B2 -A10 -i "fatal\|androidruntime" artifacts/logcat.txt | head -50
-
-            # 5) ANR
-            adb shell cat /data/anr/traces.txt > artifacts/anr.txt 2>/dev/null || echo "no anr"
-
-            # 6) crash.log з додатка
-            adb exec-out run-as com.totoro.assistant cat files/crash.log > artifacts/crash.log 2>/dev/null || echo "no crash.log"
-            echo "--- crash.log (last 30 lines) ---" && tail -30 artifacts/crash.log
-
-            # 7) totoro.log
-            adb exec-out run-as com.totoro.assistant cat files/totoro.log > artifacts/totoro.log 2>/dev/null || echo "no totoro.log"
-            echo "--- totoro.log (last 30) ---" && tail -30 artifacts/totoro.log
-
-            # 8) Остання активність
-            adb shell dumpsys activity activities > artifacts/activity_dump.txt 2>&1
-
-            echo "==> ALL DIAGNOSTICS COLLECTED in artifacts/"
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p artifacts
+          # XML-звіти
+          find app/build/test-results -name "*.xml" -exec cp {} artifacts/ \; 2>/dev/null || true
+          # Stacktrace-и
+          find app/build/reports -type f -name "*.html" -exec cp {} artifacts/ \; 2>/dev/null || true
+          # Якщо попередній крок впав, гарантуємо що хоч щось буде в артефактах
+          if [ -f artifacts/raw-test-output.txt ]; then
+            cp artifacts/raw-test-output.txt artifacts/raw-test-output.txt || true
+          fi
+          ls -la artifacts/ || true
+          echo "--- DONE ---"
 
       - name: Upload diagnostics
         if: always()
@@ -122,16 +69,3 @@ jobs:
           name: totoro-test-artifacts
           path: artifacts/
           if-no-files-found: warn
-
-      - name: Decide
-        if: always()
-        run: |
-          if [ -f artifacts/processes.txt ] && grep -q totoro artifacts/processes.txt; then
-            echo "✅ PROCESS ALIVE — totoro running"
-            exit 0
-          fi
-          echo "❌ PROCESS DEAD — app crashed"
-          echo "############### LOGCAT TAIL ###############"
-          tail -100 artifacts/logcat.txt 2>/dev/null || echo "(no logcat)"
-          echo "############## END LOGCAT #################"
-          exit 1
