@@ -1,0 +1,155 @@
+name: Test on Android Emulator (API 34)
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  test-on-emulator:
+    runs-on: macos-latest   # macOS run-ers підтримують x86_64 емулятори швидко; linux теж працює
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          arch: x86_64
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" >> local.properties
+          echo "PICOVOICE_KEY=" >> local.properties
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew || true
+
+      - name: Build Debug APK
+        run: |
+          # Без Android SDK Manager install додаткових пакетів,
+          # сподіваємось що setup-android вже їх поставив
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: apk
+        run: echo "apk_path=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)" >> $GITHUB_OUTPUT
+
+      - name: Create AVD
+        run: |
+          echo "no" | avdmanager create avd \
+            --name test34 \
+            --package "system-images;android-34;google_apis;x86_64" \
+            --device pixel_4 \
+            --force
+
+      - name: Set hardware props
+        run: |
+          printf "hw.ramSize=2048\ndisk.dataPartition.size=2G\nhw.audioInput=yes\nhw.audioOutput=yes\n" >> ~/.android/avd/test34.avd/config.ini
+
+      - name: Run emulator (background)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          force-avd-creation: false
+          avd-name: test34
+          emulator-options: -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect -accel off
+          disable-animations: true
+          script: |
+            # 1) Чекати поки емулятор повністю завантажиться
+            adb wait-for-device
+            boot_completed=""
+            for i in $(seq 1 120); do
+              boot_completed=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+              if [ "$boot_completed" = "1" ]; then break; fi
+              sleep 2
+            done
+            echo "boot_completed=$boot_completed"
+
+            # 2) Встановити APK
+            apk_path=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+            echo "Installing $apk_path"
+            adb install -r -t -g "$apk_path"
+
+            # 3) Очистити старий logcat buffer
+            adb logcat -c
+
+            # 4) Запустити app
+            adb shell am force-stop com.totoro.assistant
+            sleep 1
+            adb shell am start -W -n com.totoro.assistant/.MainActivity
+
+            # 5) Дочекатися 8 секунд щоб побачити поведінку
+            sleep 8
+
+            # 6) Зібрати діагностику
+            mkdir -p artifacts
+
+            # 6a) Чи живий процес?
+            adb shell "ps -A | grep totoro" > artifacts/processes.txt || true
+
+            # 6b) Чи є Android Crash dialog?
+            adb shell "dumpsys window | grep -i 'hasSystemUi\|mFocusedWindow' || true" > artifacts/focused_window.txt || true
+
+            # 6c) Logcat за останні 30 секунд
+            adb logcat -d -t 300 *:W AndroidRuntime:E ActivityManager:I TotoroService:V TotoroWake:V System.err:W > artifacts/logcat.txt 2>&1
+
+            # 6d) Crash log від app
+            adb shell run-as com.totoro.assistant cat files/crash.log > artifacts/crash.log 2>/dev/null || echo "no crash.log or run-as denied"
+
+            # 6e) Totoro runtime log
+            adb shell run-as com.totoro.assistant cat files/totoro.log > artifacts/totoro.log 2>/dev/null || echo "no totoro.log"
+
+            # 6f) Current activity
+            adb shell dumpsys activity activities > artifacts/activity_dump.txt 2>&1 || true
+
+            # 6g) Останній ANR якщо є
+            adb shell cat /data/anr/traces.txt > artifacts/anr.txt 2>/dev/null || echo "no anr"
+
+            # 6h) Bugreport — якщо не дуже великий
+            timeout 30 adb bugreport artifacts/bugreport 2>&1 || echo "bugreport skipped"
+
+            # Показати перші 200 рядків logcat для швидкого diagnostic
+            head -200 artifacts/logcat.txt || true
+            echo "---"
+            echo "ARTIFACTS_DIR: artifacts/"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: totoro-test-artifacts
+          path: artifacts/
+
+      - name: Fail if process died
+        run: |
+          if grep -q "totoro" artifacts/processes.txt; then
+            echo "✅ totoro process alive"
+            exit 0
+          fi
+          echo "❌ totoro process NOT FOUND — app probably crashed"
+          echo "---logcat (last 100)---"
+          tail -100 artifacts/logcat.txt || true
+          echo "---crash.log---"
+          cat artifacts/crash.log 2>/dev/null || echo "(none)"
+          exit 1
