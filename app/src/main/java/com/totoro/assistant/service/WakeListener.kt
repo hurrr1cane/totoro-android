@@ -9,6 +9,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -21,13 +23,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * Слухач wake-word «торо» (або «тоторо») + capture команди.
+ * Слухач wake-word «торо» + capture команди.
  *
- * Гнучка стратегія розпізнавання wake:
- *  • приймаємо як «торо», так і «тоторо», «тору», тощо;
- *  • реагуємо на onResults І на onPartialResults, щоб не залежати від
- *    того, чи увімкнений EXTRA_PARTIAL_RESULTS на пристрої;
- *  • коли wake розпізнано — відправляємо wake-повідомлення, щоб користувач бачив, що нас почули.
+ * Версія 0.1.6 — обов'язково викликає SR API з main-потоку,
+ * що вирішує ERROR_CLIENT (5) на Android 10+.
  */
 class WakeListener(
     private val context: Context,
@@ -40,8 +39,8 @@ class WakeListener(
 
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Співпадає з «тоторо», «торо», «тору» тощо — будь-який варіант wake. */
     private val WAKE_RE = Regex("[а-яіїєґa-z]*тор[а-яіїєґa-z]+|торо|тоторо|таро", RegexOption.IGNORE_CASE)
 
     fun start() {
@@ -52,7 +51,7 @@ class WakeListener(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         if (!audioGranted) {
-            Log.w(TAG, "No RECORD_AUDIO permission, wake listener disabled")
+            Log.w(TAG, "No RECORD_AUDIO permission")
             notify("Немає дозволу на мікрофон")
             running.set(false)
             return
@@ -63,8 +62,8 @@ class WakeListener(
         } else if (SpeechRecognizer.isRecognitionAvailable(context)) {
             startSpeechRecognizer()
         } else {
-            Log.w(TAG, "SpeechRecognizer unavailable and no Porcupine key")
-            notify("SR недоступний - встановіть Google")
+            Log.w(TAG, "SpeechRecognizer unavailable")
+            notify("SR недоступний — встанови Google Search")
             running.set(false)
         }
     }
@@ -75,19 +74,27 @@ class WakeListener(
         thread = null
     }
 
-    fun captureCommand(timeoutMs: Long = 6500): String? {
+    /**
+     * Результат captureCommand — або текст, або код помилки (через [error]).
+     */
+    data class CaptureResult(val text: String? = null, val error: Int = 0, val errorName: String = "")
+
+    fun captureCommand(timeoutMs: Long = 6500): CaptureResult {
         if (ContextCompat.checkSelfPermission(
                 context, Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
-        ) return null
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return null
+        ) return CaptureResult(error = -1, errorName = "no_RECORD_AUDIO")
+        if (!SpeechRecognizer.isRecognitionAvailable(context))
+            return CaptureResult(error = -2, errorName = "SR_unavailable")
 
         val sr = try {
             SpeechRecognizer.createSpeechRecognizer(context)
         } catch (e: Throwable) {
             Log.w(TAG, "createSpeechRecognizer for capture failed", e)
-            return null
+            return CaptureResult(error = -3, errorName = "createSR_failed: ${e.message}")
         }
+        if (sr == null) return CaptureResult(error = -3, errorName = "createSR_returned_null")
+
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
@@ -95,36 +102,75 @@ class WakeListener(
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
-        var result: String? = null
+        var resultText: String? = null
+        var resultError: Int = 0
+        var resultErrorName = ""
         val done = Object()
+
         sr.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                Log.i(TAG, "capture ready: params=$params")
+            }
+            override fun onBeginningOfSpeech() {
+                Log.i(TAG, "capture beginningOfSpeech")
+            }
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {
+                Log.i(TAG, "capture endOfSpeech")
+            }
+            override fun onPartialResults(partial: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
             override fun onResults(r: Bundle?) {
                 val list = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                result = list?.firstOrNull()
+                resultText = list?.firstOrNull()
+                Log.i(TAG, "capture results: '$resultText'")
                 synchronized(done) { done.notifyAll() }
                 try { sr.destroy() } catch (_: Throwable) {}
             }
             override fun onError(e: Int) {
-                Log.w(TAG, "capture SR onError=$e")
+                resultError = e
+                resultErrorName = errorName(e)
+                Log.w(TAG, "capture onError=$e (${errorName(e)})")
                 synchronized(done) { done.notifyAll() }
                 try { sr.destroy() } catch (_: Throwable) {}
             }
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onPartialResults(partial: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
         })
-        try { sr.startListening(intent) } catch (e: Throwable) {
-            Log.w(TAG, "startListening for capture failed", e)
-            try { sr.destroy() } catch (_: Throwable) {}
-            return null
+
+        // startListening має викликатися з main-потоку (Android 10+)
+        val started = AtomicBoolean(false)
+        val startError = arrayOf<Throwable?>(null)
+        mainHandler.post {
+            try {
+                sr.startListening(intent)
+            } catch (t: Throwable) {
+                startError[0] = t
+                Log.e(TAG, "startListening exception", t)
+                synchronized(done) { done.notifyAll() }
+            } finally {
+                started.set(true)
+            }
         }
-        return synchronized(done) {
-            try { done.wait(timeoutMs) } catch (_: InterruptedException) {}
-            result
+        synchronized(done) {
+            try {
+                done.wait(timeoutMs)
+            } catch (_: InterruptedException) {
+                return CaptureResult(error = -4, errorName = "interrupted")
+            }
+        }
+        // Якщо startListening ще навіть не викликали — почекай трохи
+        var wait = 0
+        while (!started.get() && wait < 50) {
+            try { Thread.sleep(20) } catch (_: InterruptedException) { break }
+            wait++
+        }
+        try { sr.destroy() } catch (_: Throwable) {}
+
+        return when {
+            startError[0] != null -> CaptureResult(error = -5, errorName = "startListening: ${startError[0]!!.message}")
+            resultText != null -> CaptureResult(text = resultText)
+            resultError != 0 -> CaptureResult(error = resultError, errorName = resultErrorName)
+            else -> CaptureResult(error = -100, errorName = "timeout (no results, no error)")
         }
     }
 
@@ -132,12 +178,10 @@ class WakeListener(
         thread = thread(name = "totoro-wake-sr", isDaemon = true) {
             Log.i(TAG, "wake thread started")
             while (running.get()) {
-                val sr = try {
-                    SpeechRecognizer.createSpeechRecognizer(context)
-                } catch (e: Throwable) {
-                    Log.e(TAG, "createSpeechRecognizer failed", e)
-                    return@thread
-                }
+                val sr = try { SpeechRecognizer.createSpeechRecognizer(context) }
+                catch (e: Throwable) { Log.e(TAG, "createSpeechRecognizer failed", e); return@thread }
+                if (sr == null) { Thread.sleep(2000); continue }
+
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
@@ -149,40 +193,38 @@ class WakeListener(
                 var sessionTriggered = false
                 sr.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
-                        Log.d(TAG, "SR ready")
+                        Log.d(TAG, "wake SR ready")
                     }
-                    override fun onBeginningOfSpeech() {
-                        Log.d(TAG, "SR speech start")
-                    }
+                    override fun onBeginningOfSpeech() { Log.d(TAG, "wake SR beg") }
                     override fun onPartialResults(partial: Bundle?) {
                         if (!running.get()) return
                         val list = partial?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
                         val text = list.firstOrNull() ?: return
-                        Log.d(TAG, "SR partial: $text")
+                        Log.d(TAG, "wake partial: $text")
                         if (!sessionTriggered && looksLikeWake(text)) {
                             sessionTriggered = true
                             val cmd = extractCommand(text)
-                            Log.i(TAG, "Wake by partial: $text -> '$cmd'")
+                            Log.i(TAG, "wake by partial: $text -> '$cmd'")
                             notify("Чую: $text")
                             onWake(cmd)
-                            try { sr.stopListening() } catch (_: Throwable) {}
+                            try { mainHandler.post { sr.stopListening() } } catch (_: Throwable) {}
                         }
                     }
                     override fun onResults(r: Bundle?) {
                         if (!running.get()) return
                         val list = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
                         val text = list.firstOrNull() ?: ""
-                        Log.i(TAG, "SR final: '$text' (triggered=$sessionTriggered)")
+                        Log.i(TAG, "wake final: '$text' (triggered=$sessionTriggered)")
                         if (!sessionTriggered && looksLikeWake(text)) {
                             val cmd = extractCommand(text)
-                            Log.i(TAG, "Wake by final: $text -> '$cmd'")
+                            Log.i(TAG, "wake by final: $text -> '$cmd'")
                             notify("Чую: $text")
                             onWake(cmd)
                         }
                         synchronized(started) { started.notifyAll() }
                     }
                     override fun onError(e: Int) {
-                        Log.w(TAG, "SR onError=$e")
+                        Log.w(TAG, "wake SR onError=$e (${errorName(e)})")
                         synchronized(started) { started.notifyAll() }
                     }
                     override fun onRmsChanged(rmsdB: Float) {}
@@ -190,15 +232,19 @@ class WakeListener(
                     override fun onEndOfSpeech() {}
                     override fun onEvent(eventType: Int, params: Bundle?) {}
                 })
-                try { sr.startListening(intent) } catch (e: Throwable) {
-                    Log.w(TAG, "startListening failed", e)
-                    try { sr.destroy() } catch (_: Throwable) {}
-                    Thread.sleep(2000)
-                    continue
+
+                // startListening з main-потоку
+                var startFailed: Throwable? = null
+                val startedFlag = Object()
+                mainHandler.post {
+                    try { sr.startListening(intent) }
+                    catch (t: Throwable) { startFailed = t; Log.e(TAG, "wake startListening exception", t) }
+                    synchronized(startedFlag) { startedFlag.notifyAll() }
                 }
-                synchronized(started) {
-                    try { started.wait(8_000) } catch (_: InterruptedException) { return@thread }
-                }
+                synchronized(startedFlag) { try { startedFlag.wait(2000) } catch (_: InterruptedException) {} }
+                if (startFailed != null) { try { sr.destroy() } catch (_: Throwable) {}; Thread.sleep(2000); continue }
+
+                synchronized(started) { try { started.wait(8_000) } catch (_: InterruptedException) { return@thread } }
                 try { sr.destroy() } catch (_: Throwable) {}
                 if (!running.get()) return@thread
                 Thread.sleep(300)
@@ -251,21 +297,14 @@ class WakeListener(
                     .setKeywordPaths(arrayOf("totoro_android.ppn"))
                     .setSensitivity(0.7f)
                     .build(context)
-
                 val sampleRate = porcupine.sampleRate
                 val frameLength = porcupine.frameLength
                 val bufferSize = AudioRecord.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
+                    sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
                 ).coerceAtLeast(frameLength * 2)
-
                 record = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize
+                    MediaRecorder.AudioSource.MIC, sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize
                 )
                 if (record.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord not initialized")
@@ -273,7 +312,6 @@ class WakeListener(
                 }
                 record.startRecording()
                 Log.i(TAG, "Porcupine listening")
-
                 val buf = ShortArray(frameLength)
                 while (running.get()) {
                     val read = record.read(buf, 0, frameLength)
@@ -291,10 +329,24 @@ class WakeListener(
                 try { record?.stop() } catch (_: Throwable) {}
                 try { record?.release() } catch (_: Throwable) {}
                 try { porcupine?.delete() } catch (_: Throwable) {}
-                if (running.get() && SpeechRecognizer.isRecognitionAvailable(context)) {
-                    startSpeechRecognizer()
-                }
+                if (running.get() && SpeechRecognizer.isRecognitionAvailable(context)) startSpeechRecognizer()
             }
+        }
+    }
+
+    companion object {
+        @Suppress("MemberVisibilityCanBePrivate")
+        fun errorName(code: Int): String = when (code) {
+            SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (recording problem)"
+            SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (other client error)"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+            SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+            SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH (no speech detected)"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+            SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT (no input)"
+            else -> "UNKNOWN_ERROR_$code"
         }
     }
 }

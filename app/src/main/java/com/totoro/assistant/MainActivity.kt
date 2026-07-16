@@ -174,20 +174,27 @@ class MainActivity : ComponentActivity() {
     private fun testVoiceListen() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             LiveLog.error("test", "SpeechRecognizer недоступний")
+            statusText = "⚠ SR недоступний. Встанови Google Search / GMS."
             return
         }
-        LiveLog.event("test", "Запускаю одноразовий SR listen (3 сек)…")
+        LiveLog.event("test", "Запускаю одноразовий SR listen (4 сек)…")
         isTestListening = true
         scope.launch {
             val result = wakeListener?.captureCommand(timeoutMs = 4000)
             isTestListening = false
             if (result == null) {
-                LiveLog.warn("test", "SR нічого не почув (timeout 4с)")
-                statusText = "Тест: SR мовчить. Можливі причини: мікрофон зайнятий, DND, інший застосунок слухає."
+                LiveLog.error("test", "WakeListener ще не запущений — натисни 'Увімкнути'")
+                statusText = "Спочатку натисни ▶ Увімкнути"
+                return@launch
+            }
+            if (result.text != null) {
+                LiveLog.event("test", "🎤 SR почув: '${result.text}'")
+                lastCommand = result.text
+                executeCommand(result.text)
             } else {
-                LiveLog.event("test", "🎤 SR почув: '$result'")
-                lastCommand = result
-                executeCommand(result)
+                LiveLog.warn("test", "SR err=${result.error} ${result.errorName}")
+                statusText = "Помилка SR: ${result.errorName}"
+                lastError = "SR: ${result.errorName}"
             }
         }
     }
