@@ -13,6 +13,10 @@ class TotoroPrefs(ctx: Context) {
     private val sp: SharedPreferences =
         ctx.getSharedPreferences("totoro_prefs", Context.MODE_PRIVATE)
 
+    var trigger: String
+        get() = sp.getString("trigger", "торо") ?: "торо"
+        set(v) { sp.edit().putString("trigger", v).apply() }
+
     var hermesUrl: String
         get() = sp.getString("hermes_url", "") ?: ""
         set(v) { sp.edit().putString("hermes_url", v).apply() }

@@ -20,6 +20,7 @@ fun HomeScreen(
     listening: Boolean,
     lastCommand: String?,
     statusText: String?,
+    lastError: String?,
     onStartListening: () -> Unit,
     onStopListening: () -> Unit,
     onOpenSettings: () -> Unit
@@ -55,6 +56,14 @@ fun HomeScreen(
                     fontSize = 16.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                lastError?.let {
+                    Text(
+                        text = "⚠ $it",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
 
                 Spacer(Modifier.height(24.dp))
 
