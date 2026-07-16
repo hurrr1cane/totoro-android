@@ -22,7 +22,11 @@ class SmokeTest {
         val app = ApplicationProvider.getApplicationContext<TotoroApp>()
         assertNotNull(app)
         assertNotNull(app.packageName)
-        assertEquals("com.totoro.assistant", app.packageName)
+        // debug build має applicationIdSuffix .debug → очікуємо com.totoro.assistant.debug
+        // release — com.totoro.assistant. Тестуємо лише що suffix в межах очікуваного
+        val pkg = app.packageName
+        assertTrue("package=$pkg must start with com.totoro.assistant",
+            pkg == "com.totoro.assistant" || pkg == "com.totoro.assistant.debug")
     }
 
     @Test
