@@ -16,22 +16,25 @@ import com.totoro.assistant.TotoroNotificationChannel
 import com.totoro.assistant.hermes.HermesClient
 import com.totoro.assistant.prefs.TotoroPrefs
 import kotlinx.coroutines.*
+import java.util.Locale
 
 /**
  * ForegroundService, що слухає wake-word.
  *
  * Щоб не падало на Android 12+:
  *  - викликаємо startForeground() одразу в onCreate() з валідним PendingIntent;
- *  - для Android 14+ вказуємо foregroundServiceType=MICROPHONE явно через
- *    startForeground(id, notification, type) (через ServiceCompat);
- *  - нотифікація має importance LOW і category SERVICE — менше шансів бути зупиненою;
- *  - тримаємо PARTIAL_WAKE_LOCK, щоб процесор не засинав.
+ *  - для Android 10+ передаємо foregroundServiceType=MICROPHONE явно через
+ *    ServiceCompat.startForeground(id, notif, type), інакше SecurityException;
+ *  - нотифікація має importance LOW і category SERVICE;
+ *  - тримаємо PARTIAL_WAKE_LOCK, щоб процесор не засинав;
+ *  - при свайпі додатка (onTaskRemoved) ставимо alarm-restart через 1 сек,
+ *    щоб MIUI/EMUI не зупинили процес.
  */
 class TotoroListenerService : Service() {
 
     companion object {
         private const val TAG = "TotoroService"
-        const val NOTI_ID = 0x1A55  // щоб уникнути збігу з ID інших служб
+        const val NOTI_ID = 0x1A55
         const val ACTION_STOP = "com.totoro.assistant.STOP"
         const val ACTION_START = "com.totoro.assistant.START"
 
@@ -44,6 +47,7 @@ class TotoroListenerService : Service() {
     private var wakeListener: WakeListener? = null
     private var commandSession: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
+    private var ttsRef: android.speech.tts.TextToSpeech? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -54,11 +58,10 @@ class TotoroListenerService : Service() {
 
         startInForegroundCompat()
 
-        // Тримаємо CPU, навіть якщо екран погашений
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Totoro::WakeLock").apply {
             setReferenceCounted(false)
-            acquire(60 * 60 * 1000L /* 1 год, safety — служба сама поновить через alarm */)
+            acquire(60L * 60L * 1000L /* 1 год; auto-renewed via onTaskRemoved */)
         }
     }
 
@@ -71,12 +74,8 @@ class TotoroListenerService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_START, null -> {
-                startListening()
-            }
+            ACTION_START, null -> startListening()
         }
-        // START_STICKY: Android перезапустить службу якщо вб'є (на старіших),
-        // але треба повернути null intent — тож MainActivity теж стартоне через BootReceiver
         return START_STICKY
     }
 
@@ -85,14 +84,13 @@ class TotoroListenerService : Service() {
         isRunning = false
         try { wakeListener?.stop() } catch (e: Throwable) { Log.e(TAG, "wakeListener.stop", e) }
         try { wakeLock?.release() } catch (_: Throwable) {}
+        try { ttsRef?.shutdown() } catch (_: Throwable) {}
+        ttsRef = null
         try { scope.cancel() } catch (_: Throwable) {}
         super.onDestroy()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Користувач свайпнув додаток — але служба має лишитись.
-        // Restart через START_STICKY + цей alarm (на 1 сек) тримаємо її живою
-        // на агресивних MIUI/EMUI.
         val restartIntent = Intent(applicationContext, TotoroListenerService::class.java).apply {
             action = ACTION_START
         }
@@ -109,7 +107,6 @@ class TotoroListenerService : Service() {
         val notif = buildNotification("Слухаю 'Гей, Тоторо'…")
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10+ : передаємо тип служби явно, інакше crash
                 ServiceCompat.startForeground(
                     this,
                     NOTI_ID,
@@ -121,7 +118,6 @@ class TotoroListenerService : Service() {
             }
             isRunning = true
         } catch (e: Exception) {
-            // Якщо все ще падає (рідко) — fallback без типу
             Log.e(TAG, "startForeground failed, retry without type", e)
             try {
                 startForeground(NOTI_ID, notif)
@@ -147,9 +143,7 @@ class TotoroListenerService : Service() {
                     scope.launch {
                         try {
                             val cmd = wakeListener?.captureCommand(timeoutMs = 6500) ?: ""
-                            if (cmd.isNotBlank()) {
-                                execute(cmd)
-                            }
+                            if (cmd.isNotBlank()) execute(cmd)
                         } catch (e: Throwable) {
                             Log.e(TAG, "capture/execute", e)
                         } finally {
@@ -208,18 +202,24 @@ class TotoroListenerService : Service() {
     }
 
     private fun speak(text: String) {
-        // TTS — лише основний потік
         try {
-            val tts = android.speech.tts.TextToSpeech(this) { status ->
-                if (status == android.speech.tts.TextToSpeech.SUCCESS) {
-                    android.speech.tts.TextToSpeech(this).apply {
-                        language = java.util.Locale("uk", "UA")
-                        speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null,
-                            "totoro_${System.currentTimeMillis()}")
-                    }
-                }
+            ttsRef?.shutdown()
+            ttsRef = null
+
+            val ref = android.speech.tts.TextToSpeech(this) { status ->
+                if (status != android.speech.tts.TextToSpeech.SUCCESS) return@TextToSpeech
+                ttsRef?.language = Locale("uk", "UA")
+                ttsRef?.speak(
+                    text,
+                    android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "totoro_${System.currentTimeMillis()}"
+                )
             }
-        } catch (e: Throwable) { Log.e(TAG, "speak", e) }
+            ttsRef = ref
+        } catch (e: Throwable) {
+            Log.e(TAG, "speak", e)
+        }
     }
 
     private fun updateNotificationText(text: String) {
@@ -229,10 +229,6 @@ class TotoroListenerService : Service() {
         } catch (e: Throwable) { Log.e(TAG, "notify", e) }
     }
 
-    /**
-     * Побудувати нотифікацію. PendingIntent веде на MainActivity
-     * (щоб користувач міг відкрити додаток зі шторки).
-     */
     private fun buildNotification(text: String): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
