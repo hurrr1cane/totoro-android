@@ -8,20 +8,30 @@ import android.os.Build
 class TotoroApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        // ForegroundService channel
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Тоторо слухає",
-                    NotificationManager.IMPORTANCE_LOW
-                ).apply { setShowBadge(false) }
-            )
-        }
+        // Підключаємо crash handler ДО будь-яких інших ініціалізацій
+        CrashHandler.install(this)
+        ensureNotificationChannel()
     }
 
-    companion object {
-        const val CHANNEL_ID = "totoro_listen"
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(NotificationManager::class.java)
+            if (nm.getNotificationChannel(TotoroNotificationChannel.ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        TotoroNotificationChannel.ID,
+                        "Тоторо слухає",
+                        NotificationManager.IMPORTANCE_LOW
+                    ).apply {
+                        setShowBadge(false)
+                        description = "Постійна нотифікація ForegroundService голосового асистента."
+                    }
+                )
+            }
+        }
     }
+}
+
+object TotoroNotificationChannel {
+    const val ID = "totoro_listen"
 }
