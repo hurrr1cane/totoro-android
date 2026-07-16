@@ -1,8 +1,7 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Totoro" parent="android:Theme.Material.NoActionBar">
+    <!-- Базова стандартна тема (без Material-специфічних атрибутів) -->
+    <style name="Theme.Totoro" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:statusBarColor" tools:targetApi="l">@color/bg</item>
-        <item name="android:colorPrimary">#4c8bf5</item>
-        <item name="android:colorOnPrimary">#FFFFFF</item>
     </style>
 </resources>

@@ -1,3 +1,5 @@
-<resources>
-    <style name="Theme.Totoro.Splash" parent="Theme.Totoro"/>
-</resources>
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Не резервувати prefs (там можуть бути токени) -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="totoro_prefs.xml"/>
+</full-backup-content>
