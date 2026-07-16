@@ -1,0 +1,115 @@
+name: Test on Linux x86_64 Emulator
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  test-on-linux-emu:
+    # ubuntu-latest має KVM-підтримку — швидший емулятор
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [30]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node="' | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          ls -la /dev/kvm || echo "no kvm"
+
+      - name: Run emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          profile: pixel_4
+          force-avd-creation: true
+          avd-name: totoro_avd
+          emulator-options: -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect -memory 2048 -no-accel -verbose
+          disable-animations: true
+          emulator-boot-timeout: 600
+          script: |
+            set -e
+            apk_path=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+            ls -la "$apk_path"
+
+            echo "==> Waiting for boot..."
+            adb wait-for-device
+            for i in $(seq 1 60); do
+              boot=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+              if [ "$boot" = "1" ]; then break; fi
+              sleep 3
+            done
+            echo "==> Android API: $(adb shell getprop ro.build.version.sdk)"
+            echo "==> Boot completed: $boot"
+
+            echo "==> Installing APK..."
+            adb install -r -t -g "$apk_path" 2>&1 | tail -3
+
+            echo "==> Pre-clear logcat..."
+            adb logcat -c
+
+            echo "==> Force-stop & Start..."
+            adb shell am force-stop com.totoro.assistant
+            sleep 1
+            timeout 15 adb shell am start -W -n com.totoro.assistant/.MainActivity 2>&1 | head -10
+            sleep 8
+
+            echo "==> Diagnostics..."
+            mkdir -p artifacts
+            adb shell "ps -A 2>/dev/null | grep -i totoro" > artifacts/processes.txt || true
+            adb shell dumpsys window windows > artifacts/windows.txt 2>&1
+            adb logcat -d -v threadtime *:W AndroidRuntime:E ActivityManager:I TotoroCrash:V TotoroService:V TotoroWake:V System.err:W > artifacts/logcat.txt 2>&1
+
+            echo "---PROCESSES---" && cat artifacts/processes.txt
+            echo "---LOG TAIL---"
+            tail -200 artifacts/logcat.txt
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: totoro-emu-artifacts
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Decide pass/fail
+        if: always()
+        run: |
+          if [ -s artifacts/processes.txt ]; then
+            echo "✅ PASS — totoro process exists"
+            cat artifacts/processes.txt
+            exit 0
+          fi
+          echo "❌ FAIL — no totoro process"
+          echo "===LAST 80 LINES OF LOGCAT==="
+          tail -80 artifacts/logcat.txt 2>/dev/null || echo "(empty)"
+          echo "===PROCESSES (empty?)==="
+          cat artifacts/processes.txt 2>/dev/null || echo "(empty)"
+          exit 1
